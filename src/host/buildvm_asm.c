@@ -96,7 +96,10 @@ static void emit_asm_halfwords(BuildCtx *ctx, uint8_t *p, int n)
   int i;
   for (i = 0; i < n; i++) {
     if ((i & 7) == 0)
-      fprintf(ctx->fp, "\t.hword 0x%hx", cp[i]);
+      /* .short is accepted by both GNU as and LLVM's SystemZ assembler.
+      ** .hword is a GNU target alias which LLVM does not recognize here.
+      */
+      fprintf(ctx->fp, "\t.short 0x%hx", cp[i]);
     else
       fprintf(ctx->fp, ",0x%hx", cp[i]);
     if ((i & 7) == 7) putc('\n', ctx->fp);
@@ -412,4 +415,3 @@ void emit_asm(BuildCtx *ctx)
   }
   fprintf(ctx->fp, "\n");
 }
-

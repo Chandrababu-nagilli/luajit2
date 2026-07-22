@@ -167,6 +167,13 @@ typedef enum {
 /* Machine code type. */
 #if LJ_TARGET_X86ORX64
 typedef uint8_t MCode;
+#elif LJ_TARGET_S390X
+/* z/Architecture instructions are 2, 4 or 6 bytes long and all branch
+** displacements are halfword-aligned. Keep assembler offsets in halfwords,
+** just as x86 keeps them in bytes and the fixed-width targets keep them in
+** 32-bit instructions.
+*/
+typedef uint16_t MCode;
 #else
 typedef uint32_t MCode;
 #endif
