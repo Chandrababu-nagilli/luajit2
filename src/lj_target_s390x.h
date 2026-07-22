@@ -136,4 +136,16 @@ typedef enum {
   S390X_CC_ALWAYS = 15
 } S390XCC;
 
+/* Return the address of a per-trace exit stub. Keep this in sync with
+** asm_exitstub_setup(). Each stub is an LGHI followed by a BRCL (10 bytes).
+*/
+static LJ_AINLINE uint16_t *exitstub_trace_addr_(uint16_t *pe,
+						 uint32_t nexits, uint32_t exitno)
+{
+  return pe - 5*nexits + 5*exitno;
+}
+#define exitstub_trace_addr(T, exitno) \
+  exitstub_trace_addr_((MCode *)((char *)(T)->mcode + (T)->szmcode), \
+	(T)->nsnap + ((T)->root ? 1 : 0), (exitno))
+
 #endif

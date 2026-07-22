@@ -365,8 +365,10 @@ int dasm_link(Dst_DECL, size_t * szp)
           ofs -= (b[pos++] + ofs) & *p++;
           break;
         case DASM_REL_LG:
-        case DASM_REL_PC:
           p++;
+          pos++;
+          break;
+        case DASM_REL_PC:
           pos++;
           break;
         case DASM_LABEL_LG:
@@ -441,10 +443,12 @@ int dasm_encode(Dst_DECL, void *buffer)
           break;
         case DASM_REL_LG:
           CK(n >= 0, UNDEF_LG);
+          p++;                  /* Skip local/global label number. */
+          goto patchintrel;
         case DASM_REL_PC:
           CK(n >= 0, UNDEF_PC);
+        patchintrel:
           n = *DASM_POS2PTR(D, n) - (int)((char *)cp - base);
-          p++;                  /* skip argument */
         patchrel:
           /* Offsets are halfword aligned (so need to be halved). */
           n += 2;               /* Offset is relative to start of instruction. */
@@ -539,4 +543,3 @@ int dasm_checkstep(Dst_DECL, int secmatch)
   return D->status;
 }
 #endif
-

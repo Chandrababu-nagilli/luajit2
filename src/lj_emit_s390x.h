@@ -86,6 +86,8 @@ static void emit_rxy(ASMState *as, uint16_t op, Reg r1, Reg rx, Reg base,
 #define S390X_RRE_LTGR	0xb902
 #define S390X_RRE_LCGR	0xb903
 #define S390X_RRE_LGR	0xb904
+#define S390X_RRE_LGFR	0xb914
+#define S390X_RRE_LLGFR	0xb916
 #define S390X_RRE_AGR	0xb908
 #define S390X_RRE_SGR	0xb909
 #define S390X_RRE_MSGR	0xb90c
@@ -140,6 +142,10 @@ static void emit_rxy(ASMState *as, uint16_t op, Reg r1, Reg rx, Reg base,
 #define S390X_RXY_LEY	0xed64
 #define S390X_RXY_STEY	0xed66
 #define S390X_RXY_LAY	0xe371
+
+#define S390X_RSY_SRAG	0xeb0a
+#define S390X_RSY_SRLG	0xeb0c
+#define S390X_RSY_SLLG	0xeb0d
 
 #if LJ_64
 static intptr_t get_k64val(ASMState *as, IRRef ref)
