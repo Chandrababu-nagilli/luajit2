@@ -73,11 +73,11 @@ enum {
 #define RSET_ALL	(RSET_GPR|RSET_FPR)
 #define RSET_INIT	RSET_ALL
 
-/* Linux s390x ELF: r0-r5 and r14, plus f0-f7, are call-clobbered. r6 is an
-** argument register, but is callee-saved and therefore is not in SCRATCH.
+/* Linux s390x ELF: r0-r5 and r14, plus f0-f7, are call-clobbered. Include
+** callee-saved r6 too, since generated calls overwrite it as argument five.
 */
 #define RSET_SCRATCH_GPR \
-  (RSET_RANGE(RID_R0, RID_R5+1)|RID2RSET(RID_R14))
+  (RSET_RANGE(RID_R0, RID_R6+1)|RID2RSET(RID_R14))
 #define RSET_SCRATCH_FPR	RSET_RANGE(RID_F0, RID_F7+1)
 #define RSET_SCRATCH		(RSET_SCRATCH_GPR|RSET_SCRATCH_FPR)
 

@@ -43,6 +43,20 @@ static void emit_rre(ASMState *as, uint16_t op, Reg r1, Reg r2)
   emit_hw2(as, op, (uint16_t)(((r1 & 15) << 4) | (r2 & 15)));
 }
 
+/* RRF-e: 16-bit opcode, rounding mask, two registers. */
+static void emit_rrfe(ASMState *as, uint16_t op, Reg r1, uint8_t m3, Reg r2)
+{
+  emit_hw2(as, op, (uint16_t)(((m3 & 15) << 12) |
+			      ((r1 & 15) << 4) | (r2 & 15)));
+}
+
+/* RRF-c: 16-bit opcode, condition mask, two registers. */
+static void emit_rrfc(ASMState *as, uint16_t op, Reg r1, Reg r2, uint8_t m3)
+{
+  emit_hw2(as, op, (uint16_t)(((m3 & 15) << 12) |
+			      ((r1 & 15) << 4) | (r2 & 15)));
+}
+
 /* RI-a: a7/r/op/imm16. */
 static void emit_ri(ASMState *as, uint8_t op, Reg r1, int32_t imm)
 {
@@ -88,6 +102,12 @@ static void emit_rxy(ASMState *as, uint16_t op, Reg r1, Reg rx, Reg base,
 #define S390X_RRE_LGR	0xb904
 #define S390X_RRE_LGFR	0xb914
 #define S390X_RRE_LLGFR	0xb916
+#define S390X_RRE_LGBR	0xb906
+#define S390X_RRE_LGHR	0xb907
+#define S390X_RRE_LLGCR	0xb984
+#define S390X_RRE_LLGHR	0xb985
+#define S390X_RRE_LRVGR	0xb90f
+#define S390X_RRE_LRVR	0xb91f
 #define S390X_RRE_AGR	0xb908
 #define S390X_RRE_SGR	0xb909
 #define S390X_RRE_MSGR	0xb90c
@@ -110,6 +130,19 @@ static void emit_rxy(ASMState *as, uint16_t op, Reg r1, Reg rx, Reg base,
 #define S390X_RRE_MDBR	0xb31c
 #define S390X_RRE_DEBR	0xb30d
 #define S390X_RRE_DDBR	0xb31d
+#define S390X_RRE_SQDBR	0xb315
+#define S390X_RRE_CEFBR	0xb394
+#define S390X_RRE_CDFBR	0xb395
+#define S390X_RRE_CDGBR	0xb3a5
+#define S390X_RRF_CFEBR	0xb398
+#define S390X_RRF_CFDBR	0xb399
+#define S390X_RRF_CGEBR	0xb3a8
+#define S390X_RRF_CGDBR	0xb3a9
+#define S390X_RRF_CLGEBR	0xb3ac
+#define S390X_RRF_CLGDBR	0xb3ad
+#define S390X_RRF_LOCGR	0xb9e2
+#define S390X_RRE_LDGR	0xb3c1
+#define S390X_RRE_LGDR	0xb3cd
 #define S390X_RRE_LCEBR	0xb303
 #define S390X_RRE_LCDBR	0xb313
 
@@ -134,9 +167,15 @@ static void emit_rxy(ASMState *as, uint16_t op, Reg r1, Reg rx, Reg base,
 #define S390X_RXY_LG	0xe304
 #define S390X_RXY_LGF	0xe314
 #define S390X_RXY_LLGF	0xe316
+#define S390X_RXY_LGH	0xe315
+#define S390X_RXY_LGB	0xe377
+#define S390X_RXY_LLGH	0xe391
+#define S390X_RXY_LLGC	0xe390
 #define S390X_RXY_STG	0xe324
 #define S390X_RXY_LY	0xe358
 #define S390X_RXY_STY	0xe350
+#define S390X_RXY_STH	0xe370
+#define S390X_RXY_STC	0xe372
 #define S390X_RXY_LDY	0xed65
 #define S390X_RXY_STDY	0xed67
 #define S390X_RXY_LEY	0xed64
@@ -146,6 +185,8 @@ static void emit_rxy(ASMState *as, uint16_t op, Reg r1, Reg rx, Reg base,
 #define S390X_RSY_SRAG	0xeb0a
 #define S390X_RSY_SRLG	0xeb0c
 #define S390X_RSY_SLLG	0xeb0d
+#define S390X_RSY_RLLG	0xeb1c
+#define S390X_RSY_RLL	0xeb1d
 
 #if LJ_64
 static intptr_t get_k64val(ASMState *as, IRRef ref)
