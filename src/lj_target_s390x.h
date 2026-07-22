@@ -36,6 +36,8 @@ enum {
 
   /* Calling conventions. */
   RID_RET = RID_R2,
+  RID_RETHI = RID_R2,
+  RID_RETLO = RID_R3,
   RID_FPRET = RID_F0,
 
   /* These definitions must match with the *.dasc file(s): */
@@ -116,5 +118,22 @@ typedef struct {
 #define EXITSTATE_CHECKEXIT	1
 
 /* -- Instructions -------------------------------------------------------- */
+
+/* The s390x backend emits 16-bit instruction halfwords. Instructions are
+** always halfword-aligned and are two, four or six bytes long.
+*/
+typedef uint16_t S390XIns;
+
+typedef enum {
+  S390X_CC_O = 1,
+  S390X_CC_H = 2,
+  S390X_CC_L = 4,
+  S390X_CC_NE = 7,
+  S390X_CC_E = 8,
+  S390X_CC_HE = 10,
+  S390X_CC_LE = 12,
+  S390X_CC_NO = 14,
+  S390X_CC_ALWAYS = 15
+} S390XCC;
 
 #endif

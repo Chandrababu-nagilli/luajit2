@@ -231,6 +231,8 @@ static Reg rset_pickrandom(ASMState *as, RegSet rs)
 #include "lj_emit_ppc.h"
 #elif LJ_TARGET_MIPS
 #include "lj_emit_mips.h"
+#elif LJ_TARGET_S390X
+#include "lj_emit_s390x.h"
 #else
 #error "Missing instruction emitter for target CPU"
 #endif
