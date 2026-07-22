@@ -102,6 +102,15 @@ static MSize CALLBACK_OFS2SLOT(MSize ofs)
 
 #define CALLBACK_MCODE_HEAD		52
 
+#elif LJ_TARGET_S390X
+
+/* A 24-byte shared header followed by 8-byte callback slots. Each slot loads
+** its 16-bit slot number into the non-argument register r0 and branches back
+** to the header. The header loads g into r1 and jumps to the VM callback.
+*/
+#define CALLBACK_MCODE_HEAD		24
+#define CALLBACK_MCODE_SLOTSZ		8
+
 #else
 
 /* Missing support for this architecture. */
@@ -312,6 +321,38 @@ static void *callback_mcode_init(global_State *g, uint32_t *page)
     *p = MIPSI_B | ((page-p-1) & 0x0000ffffu);
     p++;
     *p++ = MIPSI_LI | MIPSF_T(RID_R1) | slot;
+  }
+  return p;
+}
+#elif LJ_TARGET_S390X
+static void *callback_mcode_init(global_State *g, uint16_t *page)
+{
+  uint16_t *p = page;
+  intptr_t target = (intptr_t)(void *)lj_vm_ffi_callback;
+  int64_t delta = target - (intptr_t)(p+3);
+  MSize slot;
+
+  /* lgrl r1, 16; jg lj_vm_ffi_callback; nopr; nopr; .quad g */
+  p[0] = 0xc418; p[1] = 0; p[2] = 8;
+  lj_assertX((delta & 1) == 0 &&
+	     delta >= -(int64_t)U64x(00000001,00000000) &&
+	     delta < (int64_t)U64x(00000001,00000000),
+	     "callback target out of s390x long-branch range");
+  delta >>= 1;
+  p[3] = 0xc0f4;
+  p[4] = (uint16_t)((uint64_t)delta >> 16);
+  p[5] = (uint16_t)delta;
+  p[6] = 0x0700; p[7] = 0x0700;
+  *(void **)(void *)(p+8) = g;
+  p += CALLBACK_MCODE_HEAD/2;
+
+  for (slot = 0; slot < CALLBACK_MAX_SLOT; slot++) {
+    ptrdiff_t back = page - (p+2);
+    lj_assertX(back >= -32768 && back <= 32767,
+	       "callback header out of s390x short-branch range");
+    p[0] = 0xa708; p[1] = (uint16_t)slot;  /* lhi r0, slot */
+    p[2] = 0xa7f4; p[3] = (uint16_t)back;  /* j header */
+    p += CALLBACK_MCODE_SLOTSZ/2;
   }
   return p;
 }

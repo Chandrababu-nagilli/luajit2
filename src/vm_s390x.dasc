@@ -1997,9 +1997,21 @@ static void build_subroutines(BuildCtx *ctx)
   |//-- Special dispatch targets -------------------------------------------
   |//-----------------------------------------------------------------------
   |
-  |->vm_record:				// Dispatch target for recording phase.
-  |  stg r0, 0
-  |  stg r0, 0
+|->vm_record:				// Dispatch target for recording phase.
+|.if JIT
+|  llgc RD, (DISPATCH_GL(hookmask))(DISPATCH)
+|  tmll RD, HOOK_VMEVENT		// No recording while in vmevent.
+|  jne >5
+|  // Decrement the hookcount for consistency, but always do the call.
+|  ly TMPR0, (DISPATCH_GL(hookcount))(DISPATCH)
+|  tmll RD, HOOK_ACTIVE
+|  jne >1
+|  ahi TMPR0, -1
+|  tmll RD, LUA_MASKLINE|LUA_MASKCOUNT
+|  je >1
+|  sty TMPR0, (DISPATCH_GL(hookcount))(DISPATCH)
+|  j >1
+|.endif
   |
   |->vm_rethook:			// Dispatch target for return hooks.
   |  llgc RD, (DISPATCH_GL(hookmask))(DISPATCH)
@@ -2038,9 +2050,11 @@ static void build_subroutines(BuildCtx *ctx)
   |  lg TMPR1, GG_DISP2STATIC(TMPR1, DISPATCH)
   |  br TMPR1
   |
-  |->cont_hook:				// Continue from hook yield.
-  |  stg r0, 0
-  |  stg r0, 0
+|->cont_hook:				// Continue from hook yield.
+|  lg TMPR0, -40(RB)
+|  la PC, 4(PC)
+|  st TMPR0, SAVE_MULTRES		// Restore MULTRES for *M ins.
+|  j <4
   |
   |->vm_hotloop:			// Hot loop counter underflow.
   |.if JIT
@@ -2101,9 +2115,18 @@ static void build_subroutines(BuildCtx *ctx)
   |  stg r0, 0
   |  stg r0, 0
   |
-  |->vm_profhook:			// Dispatch target for profiler hook.
-  |  stg r0, 0
-  |  stg r0, 0
+|->vm_profhook:			// Dispatch target for profiler hook.
+#if LJ_HASPROFILE
+|  lg L:RB, SAVE_L
+|  stg BASE, L:RB->base
+|  lgr CARG2, PC
+|  lgr CARG1, L:RB
+|  brasl r14, extern lj_dispatch_profile	// (lua_State *L, const BCIns *pc)
+|  // HOOK_PROFILE is off again, so re-dispatch to dynamic instruction.
+|  lg BASE, L:RB->base
+|  aghi PC, -4
+|  j ->cont_nop
+#endif
   |
   |//-----------------------------------------------------------------------
   |//-- Trace exit handler -------------------------------------------------
@@ -2134,10 +2157,17 @@ static void build_subroutines(BuildCtx *ctx)
   |  vm_round vm_ceil,  6 // Round towards +inf.
   |  vm_round vm_trunc, 5 // Round towards 0.
   |
-  |// FP modulo x%y. Called by BC_MOD* and vm_arith.
-  |->vm_mod: // NYI.
-  |  stg r0, 0
-  |  stg r0, 0
+|// FP modulo x%y. Called by BC_MOD* and vm_arith.
+|// Arguments are in f0/f2, result is returned in f0.
+|// Lua modulo is x-floor(x/y)*y, not the truncating C fmod operation.
+|->vm_mod:
+|  ldr f4, f0
+|  ddbr f0, f2
+|  fidbra f0, 7, f0, 0		// Round quotient towards -infinity.
+|  mdbr f0, f2
+|  sdbr f4, f0
+|  ldr f0, f4
+|  br r14
   |
   |// int64_t lj_vm_num2int_check(double x)
   |->vm_num2int_check:
@@ -2195,21 +2225,54 @@ static void build_subroutines(BuildCtx *ctx)
   |//-----------------------------------------------------------------------
   |
   |// Handler for callback functions. Callback slot number in ah/al.
-  |->vm_ffi_callback:
-  |.if FFI
-  |.type CTSTATE, CTState, PC
-  |  saveregs
-  |  la DISPATCH, GG_G2DISP(RB)
-  |  lg CTSTATE, GL:RB->ctype_state
-  |  llgcr RC, RC
-  |  stg RC, CTSTATE->cb.slot
-  |  
-  |  la RC, CFRAME_SIZE(sp)
-  |.endif
-  |
-  |->cont_ffi_callback:			// Return from FFI callback.
-  |  stg r0, 0
-  |  stg r0, 0
+|->vm_ffi_callback:
+|.if FFI
+|.type CTSTATE, CTState, PC
+|  saveregs
+|  lgr RB, r1				// Global state from callback stub.
+|  la DISPATCH, GG_G2DISP(RB)
+|  lg CTSTATE, GL:RB->ctype_state
+|  st r0, CTSTATE->cb.slot		// Callback slot from callback stub.
+|  stmg r2, r6, CTSTATE->cb.gpr[0]
+|  std f0, CTSTATE->cb.fpr[0]
+|  std f2, CTSTATE->cb.fpr[1]
+|  std f4, CTSTATE->cb.fpr[2]
+|  std f6, CTSTATE->cb.fpr[3]
+|  la TMPR0, (CFRAME_SPACE+CCALL_SPS_EXTRA*8)(sp)
+|  stg TMPR0, CTSTATE->cb.stack
+|  stg CTSTATE, SAVE_PC			// Any value outside bytecode is ok.
+|  lgr CARG2, sp
+|  lgr CARG1, CTSTATE
+|  brasl r14, extern lj_ccallback_enter	// (CTState *cts, void *cf)
+|  // Returns lua_State *.
+|  stg CRET1, SAVE_L
+|  lgr L:RB, CRET1
+|  lg BASE, L:RB->base
+|  lg RD, L:RB->top
+|  sgr RD, BASE
+|  srlg RD, RD, 3
+|  aghi NARGS:RD, 1
+|  lg LFUNC:KBASE, -16(BASE)
+|  cleartp LFUNC:KBASE
+|  lgr LFUNC:RB, LFUNC:KBASE
+|  set_vmstate INTERP
+|  ins_callt
+|.endif
+|
+|->cont_ffi_callback:			// Return from FFI callback.
+|.if FFI
+|  lg CTSTATE, (DISPATCH_GL(ctype_state))(DISPATCH)
+|  lg L:KBASE, SAVE_L
+|  stg BASE, L:KBASE->base
+|  stg RB, L:KBASE->top
+|  stg L:KBASE, CTSTATE->L
+|  lgr CARG2, RC
+|  lgr CARG1, CTSTATE
+|  brasl r14, extern lj_ccallback_leave	// (CTState *cts, TValue *o)
+|  lg CRET1, CTSTATE->cb.gpr[0]
+|  ld f0, CTSTATE->cb.fpr[0]
+|  j ->vm_leave_unw
+|.endif
   |
   |->vm_ffi_call:			// Call C function via FFI.
   |  // Caveat: needs special frame unwinding, see below.
@@ -4324,4 +4387,3 @@ static void emit_asm_debug(BuildCtx *ctx)
     break;
   }
 }
-
