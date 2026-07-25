@@ -194,6 +194,7 @@
 |// Assumes DISPATCH is relative to GL.
 #define DISPATCH_GL(field)	(GG_DISP2G + (int)offsetof(global_State, field))
 #define DISPATCH_J(field)	(GG_DISP2J + (int)offsetof(jit_State, field))
+#define GCTRACE_MCODE_OFFSET	((int)offsetof(GCtrace, mcode))
 |
 #define PC2PROTO(field)  ((int)offsetof(GCproto, field)-(int)sizeof(GCproto))
 |
@@ -268,23 +269,25 @@
 |.macro hotloop, reg
 |  lgr reg, PC   
 |  srlg reg, reg, 1
-|  nill reg, HOTCOUNT_PCMASK 
-|  afi reg, GG_DISP2HOT
+|  nill reg, HOTCOUNT_PCMASK
+|  llghr reg, reg
 |  agr reg, DISPATCH
-|  lg TMPR1, 0(reg)
+|  agfi reg, GG_DISP2HOT
+|  lgh TMPR1, 0(reg)
 |  aghi TMPR1, -HOTCOUNT_LOOP 
-|  stg TMPR1, 0(reg)
+|  sth TMPR1, 0(reg)
 |  jl ->vm_hotloop
 |.endmacro
 |.macro hotcall, reg
 |  lgr reg, PC
 |  srlg reg, reg, 1
 |  nill reg, HOTCOUNT_PCMASK
-|  afi reg, GG_DISP2HOT
+|  llghr reg, reg
 |  agr reg, DISPATCH
-|  lg TMPR1, 0(reg)
+|  agfi reg, GG_DISP2HOT
+|  lgh TMPR1, 0(reg)
 |  aghi TMPR1, -HOTCOUNT_CALL
-|  stg TMPR1, 0(reg)
+|  sth TMPR1, 0(reg)
 |  jl ->vm_hotcall
 |.endmacro
 |
@@ -2187,11 +2190,11 @@ static void build_subroutines(BuildCtx *ctx)
   |  saveg 12
   |  saveg 13
   |  saveg 14
+  |  lgr CARG5, TMPR1			// Preserve trace number from r1 BEFORE it's overwritten.
   |  lay TMPR1, EXIT_SIZE(sp)
   |  stg TMPR1, 0(sp)
   |  stg TMPR1, EXIT_STATE+16*8+15*8(sp)
-  |  lgr CARG4, TMPR0			// Preserve exit number.
-  |  lgr CARG5, r1			// Preserve trace number.
+  |  lgr CARG4, TMPR0			// Preserve exit number from r0.
   |  lay DISPATCH, -GG_DISP2G(ITYPE)
   |  set_vmstate EXIT
   |  lg L:RB, DISPATCH_GL(cur_L)(DISPATCH)
@@ -4259,10 +4262,11 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
   case BC_JLOOP:
     |.if JIT
     |  // RA = base (ignored), RD = trace number.
-    |  sllg TMPR0, RD, 3
-    |  lg TMPR1, DISPATCH_J(trace)(DISPATCH)
-    |  lg TRACE:TMPR0, 0(TMPR0, TMPR1)
-    |  lg TMPR1, TRACE:TMPR0->mcode
+    |  lg TMPR0, DISPATCH_J(trace)(DISPATCH)
+    |  sllg TMPR1, RD, 3  // Multiply trace number by 8 (sizeof(GCRef) in GC64 mode)
+    |  lgr ITYPE, TMPR0  // Copy trace array base to ITYPE
+    |  lg TMPR1, 0(TMPR1, ITYPE)  // Load trace pointer using index+base
+    |  lg TMPR1, 88(TMPR1)  // Load mcode from trace+88
     |  lghi TMPR0, 0
     |  stg TMPR0, DISPATCH_GL(vmstate)(DISPATCH)
     |  stg BASE, DISPATCH_GL(jit_base)(DISPATCH)

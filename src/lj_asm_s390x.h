@@ -63,6 +63,7 @@ static void asm_exitstub_setup(ASMState *as, ExitNo nexits)
   as->mcp = mxp;
   emit_jmp(as, (MCode *)(void *)lj_vm_exit_handler);
   emit_loadi(as, RID_TMP2, as->T->traceno);
+  emit_rre(as, S390X_RRE_LGR, RID_LR, RID_TMP2);
   common = as->mcp;
   for (i = 0; i < nexits; i++) {
     MCode *p = mxp + 5*i;
@@ -191,12 +192,28 @@ static void asm_callround(ASMState *as, IRIns *ir, IRCallID id)
   ra_leftov(as, REGARG_FIRSTFPR, ir->op1);
 }
 static void asm_retf(ASMState *as, IRIns *ir)
-{ asm_s390x_nyi(as, ir); }
+{
+  Reg base = ra_alloc1(as, ir->op1, RSET_GPR);
+  void *func = (void *)ir_kptr(IR(ir->op2));
+  if (ir->op2 == REF_NIL) {  /* Tail call to C function. */
+    /* No special handling needed, just emit the call. */
+  }
+  /* Store the return address. */
+  emit_rre(as, S390X_RRE_LGR, RID_BASE, base);
+  emit_call(as, func);
+}
 
 /* -- Operations under active implementation --------------------------- */
 
 static void asm_bufhdr_write(ASMState *as, Reg sb)
-{ UNUSED(sb); asm_s390x_nyi(as, IR(as->curins)); }
+{
+  Reg tmp = ra_scratch(as, rset_exclude(RSET_GPR, sb));
+  IRIns *ir = IR(as->curins);
+  /* SBuf.b = SBuf.w (reset buffer to write position) */
+  emit_mem(as, S390X_RXY_STG, tmp, sb, offsetof(SBuf, b));
+  emit_mem(as, S390X_RXY_LG, tmp, sb, offsetof(SBuf, w));
+  UNUSED(ir);
+}
 static void asm_tobit(ASMState *as, IRIns *ir)
 {
   Reg dest = ra_dest(as, ir, RSET_GPR);
@@ -283,9 +300,43 @@ static void asm_conv(ASMState *as, IRIns *ir)
   }
 }
 static void asm_strto(ASMState *as, IRIns *ir)
-{ asm_s390x_nyi(as, ir); }
+{
+  const CCallInfo *ci = &lj_ir_callinfo[IRCALL_lj_strscan_num];
+  IRRef args[2];
+  RegSet drop = RSET_SCRATCH;
+  if (ra_hasreg(ir->r)) rset_clear(drop, ir->r);
+  ra_evictset(as, drop);
+  asm_guard(as, S390X_CC_E);
+  emit_ril(as, S390X_RIL_CLGFI, RID_RET, 0);
+  args[0] = ir->op1;      /* GCstr *str */
+  args[1] = ASMREF_TMP1;  /* TValue *n  */
+  asm_gencall(as, ci, args);
+  /* Store the result from the temp slot. */
+  Reg dest = ra_dest(as, ir, RSET_FPR);
+  emit_mem(as, S390X_RXY_LDY, dest, RID_SP, sps_scale(SPOFS_TMP));
+  emit_loada(as, ra_releasetmp(as, ASMREF_TMP1), sps_scale(SPOFS_TMP));
+}
 static void asm_tvptr(ASMState *as, Reg dest, IRRef ref, MSize mode)
-{ UNUSED(dest); UNUSED(ref); UNUSED(mode); asm_s390x_nyi(as, IR(as->curins)); }
+{
+  if ((mode & IRTMPREF_IN1)) {
+    IRIns *ir = IR(ref);
+    if (irt_isnum(ir->t)) {
+      /* Numeric TValue: spill to stack and get address. */
+      int32_t ofs = sps_scale(ir->s);
+      emit_ril(as, S390X_RIL_AGFI, dest, ofs);
+      emit_rre(as, S390X_RRE_LGR, dest, RID_SP);
+    } else {
+      /* Other TValue types. */
+      Reg src = ra_alloc1(as, ref, RSET_GPR);
+      emit_rre(as, S390X_RRE_LGR, dest, src);
+    }
+  } else {
+    /* Allocate a temp slot and return its address. */
+    int32_t ofs = sps_scale(SPOFS_TMP);
+    emit_ril(as, S390X_RIL_AGFI, dest, ofs);
+    emit_rre(as, S390X_RRE_LGR, dest, RID_SP);
+  }
+}
 static void asm_aref(ASMState *as, IRIns *ir)
 {
   Reg dest = ra_dest(as, ir, RSET_GPR);
@@ -304,9 +355,154 @@ static void asm_aref(ASMState *as, IRIns *ir)
   }
 }
 static void asm_href(ASMState *as, IRIns *ir, IROp merge)
-{ UNUSED(merge); asm_s390x_nyi(as, ir); }
+{
+  RegSet allow = RSET_GPR;
+  int destused = ra_used(ir);
+  Reg dest = ra_dest(as, ir, allow);
+  Reg tab = ra_alloc1(as, ir->op1, rset_clear(allow, dest));
+  Reg key = RID_NONE, tmp1 = RID_TMP, tmp2;
+  IRRef refkey = ir->op2;
+  IRIns *irkey = IR(refkey);
+  int isk = irref_isk(refkey);
+  IRType1 kt = irkey->t;
+  uint32_t khash;
+  MCLabel l_end, l_loop, l_next;
+
+  rset_clear(allow, tab);
+  if (irt_isnum(kt)) {
+    key = ra_alloc1(as, refkey, RSET_FPR);
+  } else if (!irt_ispri(kt)) {
+    key = ra_alloc1(as, refkey, allow);
+    rset_clear(allow, key);
+  }
+  tmp2 = ra_scratch(as, allow);
+  rset_clear(allow, tmp2);
+
+  /* Key not found in chain: jump to exit (if merged) or load niltv. */
+  l_end = emit_label(as);
+  as->invmcp = NULL;
+  if (merge == IR_NE)
+    asm_guard(as, S390X_CC_E);
+  else if (destused)
+    emit_loada(as, dest, niltvg(J2G(as->J)));
+
+  /* Follow hash chain until the end. */
+  l_loop = --as->mcp;
+  emit_ril(as, S390X_RIL_CLGFI, dest, 0);
+  emit_mem(as, S390X_RXY_LG, dest, dest, (int32_t)offsetof(Node, next));
+  l_next = emit_label(as);
+
+  /* Type and value comparison. */
+  if (merge == IR_EQ)
+    asm_guard(as, S390X_CC_E);
+  else
+    emit_branch(as, S390X_CC_E, l_end);
+  
+  if (irt_isnum(kt)) {
+    Reg tmpfpr = ra_scratch(as, RSET_FPR);
+    emit_rre(as, S390X_RRE_CDBR, tmpfpr, key);
+    emit_branch(as, S390X_CC_HE, l_next);
+    emit_ril(as, S390X_RIL_CLGFI, tmp1, (int32_t)LJ_TISNUM);
+    emit_mem(as, S390X_RXY_LDY, tmpfpr, dest, (int32_t)offsetof(Node, key.n));
+  } else {
+    if (!irt_ispri(kt)) {
+      emit_rre(as, S390X_RRE_CGR, tmp2, key);
+      emit_branch(as, S390X_CC_NE, l_next);
+    }
+    emit_ril(as, S390X_RIL_CLGFI, tmp1, (int32_t)irt_toitype(irkey->t));
+    if (!irt_ispri(kt))
+      emit_mem(as, S390X_RXY_LG, tmp2, dest, (int32_t)offsetof(Node, key.gcr));
+  }
+  emit_mem(as, S390X_RXY_LLGF, tmp1, dest, (int32_t)offsetof(Node, key.it));
+  *l_loop = (uint16_t)(S390X_RIL_BRCL | (S390X_CC_NE << 4));
+  {
+    int32_t delta = (int32_t)(as->mcp - (l_loop+1));
+    l_loop[1] = (uint16_t)((uint64_t)delta >> 16);
+    l_loop[2] = (uint16_t)delta;
+  }
+
+  /* Load main position relative to tab->node into dest. */
+  khash = isk ? ir_khash(as, irkey) : 1;
+  if (khash == 0) {
+    emit_mem(as, S390X_RXY_LG, dest, tab, (int32_t)offsetof(GCtab, node));
+  } else {
+    Reg tmphash = tmp1;
+    if (isk)
+      tmphash = ra_allock(as, khash, allow);
+    emit_rre(as, S390X_RRE_AGR, dest, tmp1);
+    emit_ril(as, S390X_RIL_MSGFI, tmp1, sizeof(Node));
+    emit_rre(as, S390X_RRE_NGR, tmp1, tmphash);
+    emit_mem(as, S390X_RXY_LG, dest, tab, (int32_t)offsetof(GCtab, node));
+    emit_mem(as, S390X_RXY_LLGF, tmp2, tab, (int32_t)offsetof(GCtab, hmask));
+    if (isk) {
+      /* Nothing to do. */
+    } else if (irt_isstr(kt)) {
+      emit_mem(as, S390X_RXY_LLGF, tmp1, key, (int32_t)offsetof(GCstr, sid));
+    } else {  /* Must match with hash*() in lj_tab.c. */
+      emit_rre(as, S390X_RRE_SGR, tmp1, tmp2);
+      emit_rxy(as, S390X_RSY_RLLG, tmp2, tmp2, 0, HASH_ROT3);
+      emit_rre(as, S390X_RRE_XGR, tmp1, tmp2);
+      emit_rxy(as, S390X_RSY_RLLG, tmp1, tmp1, 0, (HASH_ROT2+HASH_ROT1)&63);
+      emit_rre(as, S390X_RRE_SGR, tmp2, dest);
+      if (irt_isnum(kt)) {
+        int32_t ofs = ra_spill(as, irkey);
+        emit_rre(as, S390X_RRE_XGR, tmp2, tmp1);
+        emit_rxy(as, S390X_RSY_RLLG, dest, tmp1, 0, HASH_ROT1);
+        emit_rre(as, S390X_RRE_AGR, tmp1, tmp1);
+        emit_mem(as, S390X_RXY_LG, tmp2, RID_SP, ofs+4);
+        emit_mem(as, S390X_RXY_LG, tmp1, RID_SP, ofs);
+      } else {
+        emit_rre(as, S390X_RRE_XGR, tmp2, tmp1);
+        emit_rxy(as, S390X_RSY_RLLG, dest, tmp1, 0, HASH_ROT1);
+        emit_ril(as, S390X_RIL_AGFI, tmp1, HASH_BIAS);
+        emit_loadu64(as, tmp2, (uint64_t)HASH_BIAS << 32);
+        emit_rre(as, S390X_RRE_AGR, tmp2, key);
+      }
+    }
+  }
+}
+
 static void asm_hrefk(ASMState *as, IRIns *ir)
-{ asm_s390x_nyi(as, ir); }
+{
+  IRIns *kslot = IR(ir->op2);
+  IRIns *irkey = IR(kslot->op1);
+  int32_t ofs = (int32_t)(kslot->op2 * sizeof(Node));
+  Reg node = ra_alloc1(as, ir->op1, RSET_GPR);
+  Reg dest = ra_used(ir) ? ra_dest(as, ir, RSET_GPR) : RID_NONE;
+  lj_assertA(ofs % (int32_t)sizeof(Node) == 0, "unaligned HREFK slot");
+  if (ra_hasreg(dest)) {
+    if (ofs != 0) {
+      emit_ril(as, S390X_RIL_AGFI, dest, ofs);
+      if (dest != node) emit_rre(as, S390X_RRE_LGR, dest, node);
+    } else if (dest != node) {
+      emit_rre(as, S390X_RRE_LGR, dest, node);
+    }
+  }
+  asm_guard(as, S390X_CC_NE);
+  if (irt_isnum(irkey->t)) {
+    asm_guard(as, S390X_CC_NE);
+    emit_ril(as, S390X_RIL_CLGFI, RID_TMP, (int32_t)ir_knum(irkey)->u32.hi);
+    emit_mem(as, S390X_RXY_LLGF, RID_TMP, node,
+	     ofs + (int32_t)offsetof(Node, key.u32.hi));
+    emit_ril(as, S390X_RIL_CLGFI, RID_TMP, (int32_t)ir_knum(irkey)->u32.lo);
+    emit_mem(as, S390X_RXY_LLGF, RID_TMP, node,
+	     ofs + (int32_t)offsetof(Node, key.u32.lo));
+  } else {
+    if (!irt_ispri(irkey->t)) {
+      lj_assertA(irt_isgcv(irkey->t), "bad HREFK key type");
+      asm_guard(as, S390X_CC_NE);
+      emit_loadu64(as, RID_TMP2, u64ptr(obj2gco(ir_kgc(irkey))));
+      emit_mem(as, S390X_RXY_LG, RID_TMP, node,
+	       ofs + (int32_t)offsetof(Node, key.gcr));
+      emit_rre(as, S390X_RRE_CGR, RID_TMP, RID_TMP2);
+    }
+    lj_assertA(!irt_isnil(irkey->t), "bad HREFK key type");
+    emit_ril(as, S390X_RIL_CLGFI, RID_TMP, (int32_t)irt_toitype(irkey->t));
+    emit_mem(as, S390X_RXY_LLGF, RID_TMP, node,
+	     ofs + (int32_t)offsetof(Node, key.it));
+  }
+}
+
 static void asm_uref(ASMState *as, IRIns *ir)
 {
   Reg dest = ra_dest(as, ir, RSET_GPR);
@@ -530,19 +726,59 @@ static void asm_cnew(ASMState *as, IRIns *ir)
 { asm_s390x_nyi(as, ir); }
 #endif
 static void asm_tbar(ASMState *as, IRIns *ir)
-{ asm_s390x_nyi(as, ir); }
+{
+  Reg tab = ra_alloc1(as, ir->op1, RSET_GPR);
+  Reg mark = ra_scratch(as, rset_exclude(RSET_GPR, tab));
+  Reg link = RID_TMP;
+  MCLabel l_end = emit_label(as);
+  emit_mem(as, S390X_RXY_STG, link, tab, (int32_t)offsetof(GCtab, gclist));
+  emit_mem(as, S390X_RXY_STC, mark, tab, (int32_t)offsetof(GCtab, marked));
+  emit_setgl(as, tab, gc.grayagain);
+  emit_ril(as, S390X_RIL_NILF, mark, (int32_t)~LJ_GC_BLACK);
+  emit_getgl(as, link, gc.grayagain);
+  emit_branch(as, S390X_CC_E, l_end);
+  emit_ril(as, S390X_RIL_NILF, RID_TMP, (int32_t)LJ_GC_BLACK);
+  emit_mem(as, S390X_RXY_LLGC, mark, tab, (int32_t)offsetof(GCtab, marked));
+}
+
 static void asm_obar(ASMState *as, IRIns *ir)
-{ asm_s390x_nyi(as, ir); }
+{
+  const CCallInfo *ci = &lj_ir_callinfo[IRCALL_lj_gc_barrieruv];
+  IRRef args[2];
+  MCLabel l_end;
+  Reg obj, val, tmp;
+  lj_assertA(IR(ir->op1)->o == IR_UREFC, "bad OBAR type");
+  ra_evictset(as, RSET_SCRATCH);
+  l_end = emit_label(as);
+  args[0] = ASMREF_TMP1;  /* global_State *g */
+  args[1] = ir->op1;      /* TValue *tv      */
+  asm_gencall(as, ci, args);
+  emit_rre(as, S390X_RRE_LGR, ra_releasetmp(as, ASMREF_TMP1), RID_JGL);
+  obj = IR(ir->op1)->r;
+  tmp = ra_scratch(as, rset_exclude(RSET_GPR, obj));
+  emit_branch(as, S390X_CC_E, l_end);
+  emit_ril(as, S390X_RIL_NILF, tmp, (int32_t)LJ_GC_BLACK);
+  emit_branch(as, S390X_CC_E, l_end);
+  emit_ril(as, S390X_RIL_NILF, RID_TMP, (int32_t)LJ_GC_WHITES);
+  val = ra_alloc1(as, ir->op2, rset_exclude(RSET_GPR, obj));
+  emit_mem(as, S390X_RXY_LLGC, tmp, obj,
+	   (int32_t)offsetof(GCupval, marked)-(int32_t)offsetof(GCupval, tv));
+  emit_mem(as, S390X_RXY_LLGC, RID_TMP, val, (int32_t)offsetof(GChead, marked));
+}
 
 /* -- Arithmetic --------------------------------------------------------- */
 
 static void asm_fparith(ASMState *as, IRIns *ir, uint16_t op)
 {
   Reg dest = ra_dest(as, ir, RSET_FPR);
-  Reg right = ra_alloc1(as, ir->op2, rset_exclude(RSET_FPR, dest));
-  Reg left = ra_hintalloc(as, ir->op1, dest, RSET_FPR);
-  emit_rre(as, op, dest, right);
-  if (dest != left) emit_rr(as, 0x28, dest, left);
+  Reg right, left = ra_alloc2(as, ir, RSET_FPR);
+  right = (left >> 8); left &= 255;
+  if (dest != left) {
+    emit_rr(as, 0x28, dest, left);  /* LDR dest, left */
+    emit_rre(as, op, dest, right);
+  } else {
+    emit_rre(as, op, dest, right);
+  }
 }
 
 static void asm_fpunary(ASMState *as, IRIns *ir, uint16_t op)
@@ -767,10 +1003,39 @@ static void asm_bror(ASMState *as, IRIns *ir)
     emit_rre(as, S390X_RRE_LCGR, RID_TMP, right);
   }
 }
+static void asm_intmin_max(ASMState *as, IRIns *ir, S390XCC cc)
+{
+  Reg dest = ra_dest(as, ir, RSET_GPR);
+  Reg left = ra_hintalloc(as, ir->op1, dest, RSET_GPR);
+  Reg right = ra_alloc1(as, ir->op2, rset_exclude(RSET_GPR, left));
+  emit_rrfc(as, S390X_RRF_LOCGR, dest, right, cc);
+  emit_rre(as, S390X_RRE_CGR, left, right);
+  if (dest != left) emit_rre(as, S390X_RRE_LGR, dest, left);
+}
+
+static void asm_fpmin_max(ASMState *as, IRIns *ir, S390XCC fcc)
+{
+  Reg dest = ra_dest(as, ir, RSET_FPR);
+  Reg right = ra_alloc1(as, ir->op2, rset_exclude(RSET_FPR, dest));
+  Reg left = ra_hintalloc(as, ir->op1, dest, RSET_FPR);
+  /* Use conditional move after comparison */
+  emit_rrfc(as, 0xb3c2, dest, right, fcc);  /* LOCGR-like for FP */
+  emit_rre(as, S390X_RRE_CDBR, left, right);
+  if (dest != left) emit_rr(as, 0x28, dest, left);  /* LDR */
+}
+
+static void asm_min_max(ASMState *as, IRIns *ir, S390XCC cc, S390XCC fcc)
+{
+  if (irt_isnum(ir->t))
+    asm_fpmin_max(as, ir, fcc);
+  else
+    asm_intmin_max(as, ir, cc);
+}
+
 static void asm_min(ASMState *as, IRIns *ir)
-{ asm_s390x_nyi(as, ir); }
+{ asm_min_max(as, ir, S390X_CC_L, S390X_CC_L); }
 static void asm_max(ASMState *as, IRIns *ir)
-{ asm_s390x_nyi(as, ir); }
+{ asm_min_max(as, ir, S390X_CC_H, S390X_CC_H); }
 static void asm_comp(ASMState *as, IRIns *ir)
 {
   Reg left, right;
@@ -798,9 +1063,26 @@ static void asm_comp(ASMState *as, IRIns *ir)
 static void asm_equal(ASMState *as, IRIns *ir)
 { asm_comp(as, ir); }
 static void asm_hiop(ASMState *as, IRIns *ir)
-{ asm_s390x_nyi(as, ir); }
+{
+  /* HIOP is used to hold the hiword operand of a split operation. */
+  if ((ir-1)->o == IR_CONV && irt_is64((ir-1)->t)) {
+    /* Signed conversion to 64 bit. */
+    IRIns *lo = ir-1;
+    Reg dest = ra_dest(as, ir, RSET_GPR);
+    Reg left = ra_alloc1(as, lo->op1, RSET_GPR);
+    emit_rxy(as, S390X_RSY_SRAG, dest, left, 0, 31);
+  } else {
+    /* Other HIOP cases are handled by the lo operation. */
+    lj_assertA(ra_noreg(ir->r), "HIOP should not be allocated");
+  }
+}
 static void asm_prof(ASMState *as, IRIns *ir)
-{ asm_s390x_nyi(as, ir); }
+{
+  UNUSED(ir);
+  asm_guard(as, S390X_CC_NE);
+  emit_ril(as, S390X_RIL_CLGFI, RID_TMP, 0);
+  emit_getgl(as, RID_TMP, hookmask);
+}
 
 /* -- Stack, loop and trace linkage ------------------------------------- */
 
@@ -869,7 +1151,29 @@ static void asm_stack_restore(ASMState *as, SnapShot *snap)
 #endif
 }
 static void asm_gc_check(ASMState *as)
-{ asm_s390x_nyi(as, IR(as->curins)); }
+{
+  const CCallInfo *ci = &lj_ir_callinfo[IRCALL_lj_gc_step_jit];
+  IRRef args[2];
+  MCLabel l_end;
+  Reg tmp;
+  ra_evictset(as, RSET_SCRATCH);
+  l_end = emit_label(as);
+  /* Exit trace if in GCSatomic or GCSfinalize. */
+  asm_guard(as, S390X_CC_NE);
+  emit_ril(as, S390X_RIL_CLGFI, RID_RET, 0);
+  args[0] = ASMREF_TMP1;  /* global_State *g */
+  args[1] = ASMREF_TMP2;  /* MSize steps     */
+  asm_gencall(as, ci, args);
+  emit_loadi(as, ra_releasetmp(as, ASMREF_TMP2), as->gcsteps);
+  /* Jump around GC step if GC total < GC threshold. */
+  emit_branch(as, S390X_CC_L, l_end);
+  emit_rre(as, S390X_RRE_CLGR, RID_TMP, RID_TMP2);
+  tmp = ra_releasetmp(as, ASMREF_TMP1);
+  emit_rre(as, S390X_RRE_LGR, tmp, RID_JGL);
+  emit_getgl(as, RID_TMP2, gc.threshold);
+  emit_getgl(as, RID_TMP, gc.total);
+  as->gcsteps = 0;
+}
 
 static void asm_loop_fixup(ASMState *as)
 {
