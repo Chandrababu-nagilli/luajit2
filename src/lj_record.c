@@ -2710,7 +2710,7 @@ void lj_record_ins(jit_State *J)
     break;
   case BC_JFUNCV:
     rec_func_vararg(J);
-    rec_func_jit(J, rc);
+    rec_func_setup(J);
     break;
 
   case BC_FUNCC:

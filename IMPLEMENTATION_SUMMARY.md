@@ -64,8 +64,12 @@ case BC_JFUNCV:
 **Status:** ⏸️ NOT IMPLEMENTED (Architectural Blocker)
 
 **Reason for Not Implementing:**
-- Explicitly disabled on big-endian architectures (s390x is big-endian)
-- Source code comment: "YAGNI: Disabled on big-endian due to issues with lj_vm_next, IR_HIOP, RID_RETLO/RID_RETHI and ra_destpair"
+- **CONFIRMED:** Architectural blocker affects ALL big-endian (not just 32-bit)
+- Attempted to enable on 64-bit s390x by changing guard from `#if LJ_BE` to `#if LJ_BE && LJ_32`
+- Result: **Segmentation fault** during iterator JIT compilation
+- Root cause: Issues in VM core (lj_vm_next, table iteration, IR generation, memory layout)
+- Not limited to IR_HIOP/register pairs (those are 32-bit specific)
+- Detailed investigation documented in BC_ITERN_INVESTIGATION.md
 - Would require 5-9 weeks of risky core VM development
 - LuaJIT maintainers made conscious design decision (YAGNI = "You Aren't Gonna Need It")
 
