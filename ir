@@ -1,0 +1,3 @@
+---- TRACE 1 start (command line):1
+---- TRACE 1 abort (command line):1 -- inconsistent register allocation
+

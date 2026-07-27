@@ -4339,8 +4339,8 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
 #if !LJ_HASJIT
     break;
 #endif
-    | stg r0, 0  // NYI: compiled vararg functions
-    break;           /* NYI: compiled vararg functions. */
+    | // Fall through to BC_IFUNCV. Assumes BC_IFUNCV follows.
+    break;
 
   case BC_IFUNCV:
     |  ins_AD  // BASE = new base, RA = framesize, RD = nargs+1

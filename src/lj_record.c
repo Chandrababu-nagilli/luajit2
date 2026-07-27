@@ -2709,8 +2709,8 @@ void lj_record_ins(jit_State *J)
     rec_func_lua(J);
     break;
   case BC_JFUNCV:
-    /* Cannot happen. No hotcall counting for varag funcs. */
-    lj_assertJ(0, "unsupported vararg hotcall");
+    rec_func_vararg(J);
+    rec_func_jit(J, rc);
     break;
 
   case BC_FUNCC:
