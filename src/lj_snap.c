@@ -740,7 +740,18 @@ static void snap_restoreval(jit_State *J, GCtrace *T, ExitState *ex,
       snap_restoreval(J, T, ex, snapno, rfilt, ir->op1, o);
       if (LJ_DUALNUM) setnumV(o, (lua_Number)intV(o));
       return;
-    } else if (irt_isinteger(t)) {
+    }
+#if LJ_TARGET_S390X && LJ_BE
+    /* s390x: Check for IR_HIOP to restore dual-return values from lj_vm_next.
+    ** The primary value (pointer) is in r2 (RID_RET), the secondary value
+    ** (index) is in r3 (RID_RETLO). For BC_ITERN, we need both values. */
+    else if (ref+1 < T->nins && T->ir[ref+1].o == IR_HIOP) {
+      /* This is the primary return value, HIOP follows for secondary value */
+      setintV(o, (int32_t)ex->gpr[r-RID_MIN_GPR]);
+      return;
+    }
+#endif
+    else if (irt_isinteger(t)) {
       setintV(o, (int32_t)ex->gpr[r-RID_MIN_GPR]);
 #if !LJ_SOFTFP
     } else if (irt_isnum(t)) {

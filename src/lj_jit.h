@@ -505,6 +505,7 @@ typedef struct jit_State {
   const BCIns *startpc;	/* Bytecode PC of starting instruction. */
   TraceNo parent;	/* Parent of current side trace (0 for root traces). */
   ExitNo exitno;	/* Exit number in parent of current side trace. */
+  uint8_t itern_trace_count;	/* Count of BC_ITERN traces (s390x workaround). */
   int exitcode;		/* Exit code from unwound trace. */
 
   BCIns *patchpc;	/* PC for pending re-patch. */

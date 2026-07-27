@@ -471,6 +471,22 @@ static void trace_start(jit_State *J)
   J->retryrec = 0;
   J->ktrace = 0;
   setgcref(J->cur.startpt, obj2gco(J->pt));
+  
+#if LJ_TARGET_S390X && LJ_BE
+  /* s390x workaround: Track BC_ITERN traces and auto-flush to prevent
+  ** trace accumulation bug that causes segfaults after 5-6 traces.
+  ** This is a conservative fix until HIOP state preservation across
+  ** trace exits is properly implemented. */
+  if (bc_op(*J->pc) == BC_ITERN) {
+    if (++J->itern_trace_count >= 5) {
+      /* Flush all traces to prevent accumulation bug */
+      J->itern_trace_count = 0;
+      lj_trace_flushall(J->L);
+      J->state = LJ_TRACE_IDLE;
+      return;
+    }
+  }
+#endif
 
   lj_vmevent_send_(J2G(J), TRACE,
     TValue savetv = J2G(J)->tmptv;

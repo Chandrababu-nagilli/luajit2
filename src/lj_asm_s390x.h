@@ -1084,13 +1084,19 @@ static void asm_hiop(ASMState *as, IRIns *ir)
   
   switch ((ir-1)->o) {
   case IR_CALLN: case IR_CALLL: case IR_CALLS: case IR_CALLXS:
-    if (!uselo)
+    if (!uselo) {
       ra_allocref(as, ir->op1, RID2RSET(RID_RETLO));  /* Mark lo op as used. */
-    else {
+    } else {
       /* For lj_vm_next, capture the second return value (next index) from r3 */
-      Reg dest = ra_dest(as, ir, RSET_GPR);
-      if (dest != RID_RETLO) {
-        emit_rre(as, S390X_RRE_LGR, dest, RID_RETLO);
+      /* Only allocate if HIOP is actually used (not dead code eliminated) */
+      if (usehi && !ra_noreg(ir->r)) {
+        Reg dest = ra_dest(as, ir, RSET_GPR);
+        if (dest != RID_RETLO) {
+          emit_rre(as, S390X_RRE_LGR, dest, RID_RETLO);
+        }
+      } else if (usehi) {
+        /* HIOP is used but not yet allocated - allocate to RETLO */
+        ra_destreg(as, ir, RID_RETLO);
       }
     }
     break;
