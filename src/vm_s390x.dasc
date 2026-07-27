@@ -194,6 +194,7 @@
 |// Assumes DISPATCH is relative to GL.
 #define DISPATCH_GL(field)	(GG_DISP2G + (int)offsetof(global_State, field))
 #define DISPATCH_J(field)	(GG_DISP2J + (int)offsetof(jit_State, field))
+#define GCTRACE_MCODE_OFFSET	((int)offsetof(GCtrace, mcode))
 |
 #define PC2PROTO(field)  ((int)offsetof(GCproto, field)-(int)sizeof(GCproto))
 |
@@ -268,13 +269,26 @@
 |.macro hotloop, reg
 |  lgr reg, PC   
 |  srlg reg, reg, 1
-|  nill reg, HOTCOUNT_PCMASK 
-|  afi reg, GG_DISP2HOT
+|  nill reg, HOTCOUNT_PCMASK
+|  llghr reg, reg
 |  agr reg, DISPATCH
-|  lg TMPR1, (reg) 
+|  agfi reg, GG_DISP2HOT
+|  lgh TMPR1, 0(reg)
 |  aghi TMPR1, -HOTCOUNT_LOOP 
-|  stg TMPR1, (reg) 
+|  sth TMPR1, 0(reg)
 |  jl ->vm_hotloop
+|.endmacro
+|.macro hotcall, reg
+|  lgr reg, PC
+|  srlg reg, reg, 1
+|  nill reg, HOTCOUNT_PCMASK
+|  llghr reg, reg
+|  agr reg, DISPATCH
+|  agfi reg, GG_DISP2HOT
+|  lgh TMPR1, 0(reg)
+|  aghi TMPR1, -HOTCOUNT_CALL
+|  sth TMPR1, 0(reg)
+|  jl ->vm_hotcall
 |.endmacro
 |
 |// Set current VM state.
@@ -1997,9 +2011,21 @@ static void build_subroutines(BuildCtx *ctx)
   |//-- Special dispatch targets -------------------------------------------
   |//-----------------------------------------------------------------------
   |
-  |->vm_record:				// Dispatch target for recording phase.
-  |  stg r0, 0
-  |  stg r0, 0
+|->vm_record:				// Dispatch target for recording phase.
+|.if JIT
+|  llgc RD, (DISPATCH_GL(hookmask))(DISPATCH)
+|  tmll RD, HOOK_VMEVENT		// No recording while in vmevent.
+|  jne >5
+|  // Decrement the hookcount for consistency, but always do the call.
+|  ly TMPR0, (DISPATCH_GL(hookcount))(DISPATCH)
+|  tmll RD, HOOK_ACTIVE
+|  jne >1
+|  ahi TMPR0, -1
+|  tmll RD, LUA_MASKLINE|LUA_MASKCOUNT
+|  je >1
+|  sty TMPR0, (DISPATCH_GL(hookcount))(DISPATCH)
+|  j >1
+|.endif
   |
   |->vm_rethook:			// Dispatch target for return hooks.
   |  llgc RD, (DISPATCH_GL(hookmask))(DISPATCH)
@@ -2038,9 +2064,11 @@ static void build_subroutines(BuildCtx *ctx)
   |  lg TMPR1, GG_DISP2STATIC(TMPR1, DISPATCH)
   |  br TMPR1
   |
-  |->cont_hook:				// Continue from hook yield.
-  |  stg r0, 0
-  |  stg r0, 0
+|->cont_hook:				// Continue from hook yield.
+|  lg TMPR0, -40(RB)
+|  la PC, 4(PC)
+|  st TMPR0, SAVE_MULTRES		// Restore MULTRES for *M ins.
+|  j <4
   |
   |->vm_hotloop:			// Hot loop counter underflow.
   |.if JIT
@@ -2054,7 +2082,7 @@ static void build_subroutines(BuildCtx *ctx)
   |  stg BASE, L:RB->base
   |  stg RD, L:RB->top 
   |  lgr CARG2, PC
-  |  la CARG1, GG_DISP2J(DISPATCH)
+  |  lay CARG1, GG_DISP2J(DISPATCH)
   |  stg L:RB, (DISPATCH_J(L))(DISPATCH)
   |  stg PC, SAVE_PC
   |  brasl r14, extern lj_trace_hot		// (jit_State *J, const BCIns *pc)
@@ -2101,22 +2129,158 @@ static void build_subroutines(BuildCtx *ctx)
   |  stg r0, 0
   |  stg r0, 0
   |
-  |->vm_profhook:			// Dispatch target for profiler hook.
-  |  stg r0, 0
-  |  stg r0, 0
+|->vm_profhook:			// Dispatch target for profiler hook.
+#if LJ_HASPROFILE
+|  lg L:RB, SAVE_L
+|  stg BASE, L:RB->base
+|  lgr CARG2, PC
+|  lgr CARG1, L:RB
+|  brasl r14, extern lj_dispatch_profile	// (lua_State *L, const BCIns *pc)
+|  // HOOK_PROFILE is off again, so re-dispatch to dynamic instruction.
+|  lg BASE, L:RB->base
+|  aghi PC, -4
+|  j ->cont_nop
+#endif
   |
   |//-----------------------------------------------------------------------
   |//-- Trace exit handler -------------------------------------------------
   |//-----------------------------------------------------------------------
   |
-  |// Called from an exit stub with the exit number on the stack.
-  |// The 16 bit exit number is stored with two (sign-extended) push imm8.
+  |// Called from an exit stub with exit number in r0 and trace number in r1.
+  |.define EXIT_CFRAME, 160
+  |.define EXIT_STATE, EXIT_CFRAME
+  |.define EXIT_SIZE, 416
+  |.macro savef, n
+  |  std f..n, EXIT_STATE+n*8(sp)
+  |.endmacro
+  |.macro saveg, n
+  |  stg r..n, EXIT_STATE+16*8+n*8(sp)
+  |.endmacro
   |->vm_exit_handler:
-  |  stg r0, 0
-  |  stg r0, 0
+  |.if JIT
+  |  lay sp, -EXIT_SIZE(sp)
+  |  savef 0
+  |  savef 1
+  |  savef 2
+  |  savef 3
+  |  savef 4
+  |  savef 5
+  |  savef 6
+  |  savef 7
+  |  savef 8
+  |  savef 9
+  |  savef 10
+  |  savef 11
+  |  savef 12
+  |  savef 13
+  |  savef 14
+  |  savef 15
+  |  saveg 0
+  |  saveg 1
+  |  saveg 2
+  |  saveg 3
+  |  saveg 4
+  |  saveg 5
+  |  saveg 6
+  |  saveg 7
+  |  saveg 8
+  |  saveg 9
+  |  saveg 10
+  |  saveg 11
+  |  saveg 12
+  |  saveg 13
+  |  saveg 14
+  |  lgr CARG5, TMPR1			// Preserve trace number from r1 BEFORE it's overwritten.
+  |  lay TMPR1, EXIT_SIZE(sp)
+  |  stg TMPR1, 0(sp)
+  |  stg TMPR1, EXIT_STATE+16*8+15*8(sp)
+  |  lgr CARG4, TMPR0			// Preserve exit number from r0.
+  |  lay DISPATCH, -GG_DISP2G(ITYPE)
+  |  set_vmstate EXIT
+  |  lg L:RB, DISPATCH_GL(cur_L)(DISPATCH)
+  |  lg BASE, DISPATCH_GL(jit_base)(DISPATCH)
+  |  stg L:RB, DISPATCH_J(L)(DISPATCH)
+  |  stg BASE, L:RB->base
+  |  sty CARG5, DISPATCH_J(parent)(DISPATCH)
+  |  sty CARG4, DISPATCH_J(exitno)(DISPATCH)
+  |  lghi TMPR0, 0
+  |  stg TMPR0, DISPATCH_GL(jit_base)(DISPATCH)
+  |  lay CARG1, GG_DISP2J(DISPATCH)
+  |  lay CARG2, EXIT_STATE(sp)
+  |  brasl r14, extern lj_trace_exit	// (jit_State *J, ExitState *ex)
+  |  lg TMPR1, L:RB->cframe
+  |  lg BASE, L:RB->base
+  |  nill TMPR1, CFRAME_RAWMASK
+  |  lgr sp, TMPR1
+  |  lg PC, SAVE_PC
+  |  stg L:RB, SAVE_L
+  |  j >1
+  |.endif
   |->vm_exit_interp:
-  |  stg r0, 0
-  |  stg r0, 0
+  |.if JIT
+  |  lg L:RB, SAVE_L
+  |  lay DISPATCH, -GG_DISP2G(ITYPE)
+  |  stg BASE, L:RB->base
+  |1:
+  |  lghi TMPR0, -LUA_ERRERR
+  |  clgr CRET1, TMPR0
+  |  jhe >9				// Rethrow errors from trace exit.
+  |  lg LFUNC:KBASE, -16(BASE)
+  |  cleartp LFUNC:KBASE
+  |  lg KBASE, LFUNC:KBASE->pc
+  |  lg KBASE, PC2PROTO(k)(KBASE)
+  |  sllg TMPR0, CRET1, 3
+  |  st TMPR0, SAVE_MULTRES
+  |  lghi TMPR0, 0
+  |  stg TMPR0, DISPATCH_GL(jit_base)(DISPATCH)
+  |  set_vmstate INTERP
+  |  llgc OP, 3(PC)
+  |  llgc RA, 2(PC)
+  |  llgh RD, 0(PC)
+  |  la PC, 4(PC)
+  |  cghi CRET1, -17			// Static dispatch after BC_JLOOP?
+  |  je >5
+  |  sllg TMPR1, OP, 3
+  |  lg TMPR1, 0(TMPR1, DISPATCH)
+  |  cghi OP, BC_FUNCF
+  |  jl >2
+  |  cghi OP, BC_FUNCC+2
+  |  jl >4				// Lua/C function header.
+  |  // Fast function: restore KBASE for the Lua frame below it when needed.
+  |  lg CARG3, -8(BASE)
+  |  tmll CARG3, FRAME_TYPE
+  |  jne >4				// Trace-stitching continuation.
+  |  llgc CARG4, -2(CARG3)
+  |  sllg CARG4, CARG4, 3
+  |  lgr CARG3, BASE
+  |  sgr CARG3, CARG4
+  |  lg LFUNC:CARG4, -16(CARG3)
+  |  cleartp LFUNC:CARG4
+  |  lg CARG4, LFUNC:CARG4->pc
+  |  lg KBASE, PC2PROTO(k)(CARG4)
+  |4:
+  |  lgr NARGS:RD, CRET1
+  |2:
+  |  br TMPR1
+  |
+  |5:  // Dispatch to static entry of the opcode replaced by BC_JLOOP.
+  |  sllg TMPR0, RD, 3
+  |  lg TMPR1, DISPATCH_J(trace)(DISPATCH)
+  |  lg TRACE:TMPR1, 0(TMPR0, TMPR1)
+  |  llgf TMPR0, TRACE:TMPR1->startins
+  |  llgcr OP, TMPR0
+  |  srlg RA, TMPR0, 8
+  |  nilf RA, 255				// Decode RA byte.
+  |  srlg RD, TMPR0, 16			// Decode RD halfword.
+  |  sllg TMPR1, OP, 3
+  |  lg TMPR1, GG_DISP2STATIC(TMPR1, DISPATCH)
+  |  br TMPR1
+  |
+  |9:
+  |  lcgr CARG2, CRET1
+  |  lgr CARG1, L:RB
+  |  brasl r14, extern lj_err_trace	// (lua_State *L, int errcode)
+  |.endif
   |
   |//-----------------------------------------------------------------------
   |//-- Math helper functions ----------------------------------------------
@@ -2134,10 +2298,17 @@ static void build_subroutines(BuildCtx *ctx)
   |  vm_round vm_ceil,  6 // Round towards +inf.
   |  vm_round vm_trunc, 5 // Round towards 0.
   |
-  |// FP modulo x%y. Called by BC_MOD* and vm_arith.
-  |->vm_mod: // NYI.
-  |  stg r0, 0
-  |  stg r0, 0
+|// FP modulo x%y. Called by BC_MOD* and vm_arith.
+|// Arguments are in f0/f2, result is returned in f0.
+|// Lua modulo is x-floor(x/y)*y, not the truncating C fmod operation.
+|->vm_mod:
+|  ldr f4, f0
+|  ddbr f0, f2
+|  fidbra f0, 7, f0, 0		// Round quotient towards -infinity.
+|  mdbr f0, f2
+|  sdbr f4, f0
+|  ldr f0, f4
+|  br r14
   |
   |// int64_t lj_vm_num2int_check(double x)
   |->vm_num2int_check:
@@ -2186,8 +2357,50 @@ static void build_subroutines(BuildCtx *ctx)
   |
   |->vm_next:
   |.if JIT
-  |  stg r0, 0 // NYI On big-endian.
-  |  stg r0, 0
+  |  // TValue *lj_vm_next(GCtab *t, uint32_t idx), next idx in r3.
+  |  llgf CARG4, TAB:CARG1->asize
+  |  lg CARG5, TAB:CARG1->array
+  |1:  // Traverse array part.
+  |  clgr CARG2, CARG4
+  |  jhe >5
+  |  sllg TMPR0, CARG2, 3
+  |  lg TMPR1, 0(TMPR0, CARG5)
+  |  cghi TMPR1, LJ_TNIL
+  |  je >2
+  |  lgr TMPR0, CARG2
+  |  oihf TMPR0, LJ_TISNUM<<15	// Integer key TValue (big-endian GC64).
+  |  stg TMPR1, 0(sp)
+  |  stg TMPR0, 8(sp)
+  |  aghi CARG2, 1
+  |  lgr CARG1, sp
+  |  br r14
+  |2:
+  |  aghi CARG2, 1
+  |  j <1
+  |
+  |5:  // Traverse hash part.
+  |  sgr CARG2, CARG4			// Relative node index.
+  |  llgf CARG5, TAB:CARG1->hmask
+  |  lg NODE:CARG1, TAB:CARG1->node
+  |  lgr TMPR0, CARG2
+  |  mghi TMPR0, sizeof(Node)
+  |  agr NODE:CARG1, TMPR0
+  |6:
+  |  clgr CARG2, CARG5
+  |  jh >8
+  |  lg TMPR1, NODE:CARG1->val
+  |  aghi CARG2, 1
+  |  cghi TMPR1, LJ_TNIL
+  |  jne >9
+  |  lay NODE:CARG1, sizeof(Node)(NODE:CARG1)
+  |  j <6
+  |8:  // End of iteration. Set key (not value) to nil.
+  |  lghi TMPR1, LJ_TNIL
+  |  stg TMPR1, 8(sp)
+  |  lgr CARG1, sp
+  |9:
+  |  agr CARG2, CARG4			// Convert back to absolute index.
+  |  br r14
   |.endif
   |
   |//-----------------------------------------------------------------------
@@ -2195,21 +2408,54 @@ static void build_subroutines(BuildCtx *ctx)
   |//-----------------------------------------------------------------------
   |
   |// Handler for callback functions. Callback slot number in ah/al.
-  |->vm_ffi_callback:
-  |.if FFI
-  |.type CTSTATE, CTState, PC
-  |  saveregs
-  |  la DISPATCH, GG_G2DISP(RB)
-  |  lg CTSTATE, GL:RB->ctype_state
-  |  llgcr RC, RC
-  |  stg RC, CTSTATE->cb.slot
-  |  
-  |  la RC, CFRAME_SIZE(sp)
-  |.endif
-  |
-  |->cont_ffi_callback:			// Return from FFI callback.
-  |  stg r0, 0
-  |  stg r0, 0
+|->vm_ffi_callback:
+|.if FFI
+|.type CTSTATE, CTState, PC
+|  saveregs
+|  lgr RB, r1				// Global state from callback stub.
+|  la DISPATCH, GG_G2DISP(RB)
+|  lg CTSTATE, GL:RB->ctype_state
+|  st r0, CTSTATE->cb.slot		// Callback slot from callback stub.
+|  stmg r2, r6, CTSTATE->cb.gpr[0]
+|  std f0, CTSTATE->cb.fpr[0]
+|  std f2, CTSTATE->cb.fpr[1]
+|  std f4, CTSTATE->cb.fpr[2]
+|  std f6, CTSTATE->cb.fpr[3]
+|  la TMPR0, (CFRAME_SPACE+CCALL_SPS_EXTRA*8)(sp)
+|  stg TMPR0, CTSTATE->cb.stack
+|  stg CTSTATE, SAVE_PC			// Any value outside bytecode is ok.
+|  lgr CARG2, sp
+|  lgr CARG1, CTSTATE
+|  brasl r14, extern lj_ccallback_enter	// (CTState *cts, void *cf)
+|  // Returns lua_State *.
+|  stg CRET1, SAVE_L
+|  lgr L:RB, CRET1
+|  lg BASE, L:RB->base
+|  lg RD, L:RB->top
+|  sgr RD, BASE
+|  srlg RD, RD, 3
+|  aghi NARGS:RD, 1
+|  lg LFUNC:KBASE, -16(BASE)
+|  cleartp LFUNC:KBASE
+|  lgr LFUNC:RB, LFUNC:KBASE
+|  set_vmstate INTERP
+|  ins_callt
+|.endif
+|
+|->cont_ffi_callback:			// Return from FFI callback.
+|.if FFI
+|  lg CTSTATE, (DISPATCH_GL(ctype_state))(DISPATCH)
+|  lg L:KBASE, SAVE_L
+|  stg BASE, L:KBASE->base
+|  stg RB, L:KBASE->top
+|  stg L:KBASE, CTSTATE->L
+|  lgr CARG2, RC
+|  lgr CARG1, CTSTATE
+|  brasl r14, extern lj_ccallback_leave	// (CTState *cts, TValue *o)
+|  lg CRET1, CTSTATE->cb.gpr[0]
+|  ld f0, CTSTATE->cb.fpr[0]
+|  j ->vm_leave_unw
+|.endif
   |
   |->vm_ffi_call:			// Call C function via FFI.
   |  // Caveat: needs special frame unwinding, see below.
@@ -2451,7 +2697,7 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
       |.if FFI
       |3:
       |  clfi ITYPE, LJ_TCDATA
-      if (LJ_DUALNUM && vk) {
+      if (LJ_DUALNUM && vk && (op == BC_ISEQV || op == BC_ISEQN)) {
 	|  jne <9
       } else {
 	|  jne <2
@@ -3894,7 +4140,12 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
       |  srag ITYPE, ITYPE, 47
       |  cghi ITYPE, LJ_TISNUM; jne ->vmeta_for
     } else {
-      |  ar RB, ITYPE; jo <1
+      |  ar RB, ITYPE; jno >4
+      if (op == BC_FORI) {
+	|  branchPC RD
+      }
+      |  ins_next
+      |4:
       |  setint RB
       |  stg RB, FOR_IDX
     }
@@ -3911,7 +4162,10 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     } else {
       |  jhe =>BC_JLOOP
     }
-    |  j <6
+    if (op == BC_FORI || op == BC_IFORL) {
+      |  branchPC RD
+    }
+    |  ins_next
     |9:  // Fallback to FP variant.
     if (!vk) {
       |  jhe ->vmeta_for
@@ -3952,7 +4206,10 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     } else {
       |  jnl =>BC_JLOOP
     }
-    |  j <6
+    if (op == BC_FORI || op == BC_IFORL) {
+      |  branchPC RD
+    }
+    |  ins_next
     |
     |3:  // Invert comparison if step is negative.
     |  cdbr f0, f1
@@ -4003,8 +4260,21 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     break;
 
   case BC_JLOOP:
-    |  stg r0, 0
-    |  stg r0, 0
+    |.if JIT
+    |  // RA = base (ignored), RD = trace number.
+    |  lg TMPR0, DISPATCH_J(trace)(DISPATCH)
+    |  sllg TMPR1, RD, 3  // Multiply trace number by 8 (sizeof(GCRef) in GC64 mode)
+    |  lgr ITYPE, TMPR0  // Copy trace array base to ITYPE
+    |  lg TMPR1, 0(TMPR1, ITYPE)  // Load trace pointer using index+base
+    |  lg TMPR1, 88(TMPR1)  // Load mcode from trace+88
+    |  lghi TMPR0, 0
+    |  stg TMPR0, DISPATCH_GL(vmstate)(DISPATCH)
+    |  stg BASE, DISPATCH_GL(jit_base)(DISPATCH)
+    |  lg L:RB, SAVE_L
+    |  stg L:RB, DISPATCH_GL(tmpbuf.L)(DISPATCH)
+    |  lay ITYPE, GG_DISP2G(DISPATCH)	// On-trace global_State anchor.
+    |  br TMPR1
+    |.endif
     break;
 
   case BC_JMP:
@@ -4024,7 +4294,7 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
 
   case BC_FUNCF:
     |.if JIT
-    |  stg r0, 0
+    |  hotcall RB
     |.endif
   case BC_FUNCV:  /* NYI: compiled vararg functions. */
     | // Fall through. Assumes BC_IFUNCF/BC_IFUNCV follow and ins_AD is a no-op.
@@ -4170,9 +4440,12 @@ static int build_backend(BuildCtx *ctx)
   int op;
   dasm_growpc(Dst, BC__MAX);
   build_subroutines(ctx);
+  (void)dasm_checkstep(Dst, -1);
   |.code_op
-  for (op = 0; op < BC__MAX; op++)
+  for (op = 0; op < BC__MAX; op++) {
     build_ins(ctx, (BCOp)op, op);
+    (void)dasm_checkstep(Dst, -1);
+  }
   return BC__MAX;
 }
 
@@ -4324,4 +4597,3 @@ static void emit_asm_debug(BuildCtx *ctx)
     break;
   }
 }
-

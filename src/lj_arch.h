@@ -499,13 +499,13 @@
 #define LJ_ARCH_ENDIAN		LUAJIT_BE
 #define LJ_TARGET_S390X		1
 #define LJ_TARGET_EHRETREG	0xe
+#define LJ_TARGET_EHRAREG	16
 #define LJ_TARGET_JUMPRANGE	32	/* +-2^32 = +-4GB (32-bit, halfword aligned) */
 #define LJ_TARGET_MASKSHIFT	1
 #define LJ_TARGET_MASKROT	1
 #define LJ_TARGET_UNALIGNED	1
 #define LJ_ARCH_NUMMODE		LJ_NUMMODE_DUAL
 #define LJ_TARGET_GC64		1
-#define LJ_ARCH_NOJIT		1	/* NYI */
 
 #else
 #error "No target architecture defined"

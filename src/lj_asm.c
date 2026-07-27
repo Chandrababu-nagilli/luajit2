@@ -94,7 +94,7 @@ typedef struct ASMState {
   MCode *flagmcp;	/* Pending opportunity to merge flag setting ins. */
   MCode *realign;	/* Realign loop if not NULL. */
   MCode *mctail;	/* Tail of trace before stack adjust + jmp. */
-#if LJ_TARGET_PPC || LJ_TARGET_ARM64
+#if LJ_TARGET_PPC || LJ_TARGET_ARM64 || LJ_TARGET_S390X
   MCode *mcexit;	/* Pointer to exit stubs. */
 #endif
 
@@ -231,6 +231,8 @@ static Reg rset_pickrandom(ASMState *as, RegSet rs)
 #include "lj_emit_ppc.h"
 #elif LJ_TARGET_MIPS
 #include "lj_emit_mips.h"
+#elif LJ_TARGET_S390X
+#include "lj_emit_s390x.h"
 #else
 #error "Missing instruction emitter for target CPU"
 #endif

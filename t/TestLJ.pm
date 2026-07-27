@@ -2,18 +2,20 @@ package t::TestLJ;
 
 use v5.10.1;
 use Test::Base -Base;
-use IPC::Run3;
+use IPC::Open3;
 use Cwd qw( cwd );
 use Test::LongString;
 use File::Temp qw( tempdir );
+use Symbol qw( gensym );
 
 our @EXPORT = qw( run_tests );
 
-$ENV{LUA_CPATH} = "../?.so;;";
-$ENV{LUA_PATH} = "../lua/?.lua;;";
+my $cwd = cwd;
+$ENV{LUA_CPATH} = "$cwd/src/?.so;;";
+$ENV{LUA_PATH} = "$cwd/src/?.lua;$cwd/src/?/?.lua;;";
 #$ENV{LUA_PATH} = ($ENV{LUA_PATH} || "" ) . ';' . getcwd . "/runtime/?.lua" . ';;';
 
-my $cwd = cwd;
+my $luajit = "$cwd/src/luajit";
 
 sub run_test ($) {
     my $block = shift;
@@ -24,11 +26,10 @@ sub run_test ($) {
     my $lua = $block->lua or
         die "No --- lua specified for test $name\n";
 
-    my $luafile = "test.lua";
+    my $dir = tempdir("testlj_XXXXXXX", DIR => File::Temp::tempdir(CLEANUP => 0), CLEANUP => 1);
+    my $luafile = "$dir/test.lua";
 
     {
-        my $dir = tempdir "testlj_XXXXXXX", CLEANUP => 1;
-        chdir $dir or die "$name - Cannot chdir to $dir: $!";
         open my $fh, ">$luafile"
             or die "$name - Cannot open $luafile in $dir for writing: $!\n";
         print $fh $lua;
@@ -41,21 +42,34 @@ sub run_test ($) {
 
     if ($ENV{TEST_LJ_USE_VALGRIND}) {
         warn "$name\n";
-        @cmd =  ('valgrind', '-q', '--leak-check=full', 'luajit',
-                 defined($block->jv) ? '-jv' : (),
-                 defined($block->jdump) ? '-jdump' : (),
+        @cmd =  ('valgrind', '-q', '--leak-check=full', $luajit,
+                 ($block->jv // '') ne '' ? '-jv' : (),
+                 ($block->jdump // '') ne '' ? '-jdump' : (),
                  $luafile);
     } else {
-        @cmd =  ('luajit',
-                 defined($block->jv) ? '-jv' : (),
-                 defined($block->jdump) ? '-jdump' : (),
+        @cmd =  ($luajit,
+                 ($block->jv // '') ne '' ? '-jv' : (),
+                 ($block->jdump // '') ne '' ? '-jdump' : (),
                  $luafile);
     }
 
-    run3 \@cmd, undef, \$res, \$err;
+    {
+        my ($out, $errfh);
+        $errfh = gensym();
+        my $pid = open3(undef, $out, $errfh, @cmd);
+        local $/;
+        $res = <$out>;
+        $err = <$errfh>;
+        waitpid($pid, 0);
+    }
     my $rc = $?;
 
-    #warn "res:$res\nerr:$err\n";
+    if ($ENV{TEST_LJ_DEBUG}) {
+        warn "CMD=@cmd\n";
+        warn "RC=" . ($rc >> 8) . "\n";
+        warn "STDOUT<<$res>>\n";
+        warn "STDERR<<$err>>\n";
+    }
 
     my $exp_rc = $block->exit // 0;
 
