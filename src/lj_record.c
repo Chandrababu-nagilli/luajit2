@@ -699,6 +699,10 @@ static LoopEvent rec_itern(jit_State *J, BCReg ra, BCReg rb)
   }
   J->maxslot = ra;
   lj_snap_add(J);  /* Required to make JLOOP the first ins in a side-trace. */
+#if LJ_TARGET_S390X && LJ_BE
+  /* Mark this snapshot as having HIOP state for proper exit stub generation */
+  J->cur.snap[J->cur.nsnap-1].has_hiop = 1;
+#endif
   ix.tab = getslot(J, ra-2);
   ix.key = J->base[ra-1] ? J->base[ra-1] :
 	   sloadt(J, (int32_t)(ra-1), IRT_GUARD|IRT_INT,

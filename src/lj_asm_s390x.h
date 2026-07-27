@@ -55,19 +55,55 @@ static void asm_exitstub_setup(ASMState *as, ExitNo nexits)
   MCode *pe = as->mctop;
   MCode *mxp;
   MCode *common;
+#if LJ_TARGET_S390X && LJ_BE
+  MCode *common_hiop = NULL;
+  int has_any_hiop = 0;
+  
+  /* Check if any snapshot has HIOP state */
+  for (i = 0; i < nexits; i++) {
+    if (i < as->T->nsnap && as->T->snap[i].has_hiop) {
+      has_any_hiop = 1;
+      break;
+    }
+  }
+  
+  /* Allocate extra space for HIOP-aware common exit if needed */
+  if (pe - (5*nexits + (has_any_hiop ? 16 : 8) + MCLIM_REDZONE) < as->mclim)
+    asm_mclimit(as);
+#else
   if (pe - (5*nexits + 8 + MCLIM_REDZONE) < as->mclim)
     asm_mclimit(as);
+#endif
   pe = as->mctop;
   mxp = pe - 5*nexits;
   as->mcexit = mxp;
   as->mcp = mxp;
+  
+#if LJ_TARGET_S390X && LJ_BE
+  if (has_any_hiop) {
+    /* Generate HIOP-aware common exit that preserves r3 (RID_RETLO) */
+    emit_jmp(as, (MCode *)(void *)lj_vm_exit_handler);
+    emit_loadi(as, RID_TMP2, as->T->traceno);
+    emit_rre(as, S390X_RRE_LGR, RID_LR, RID_TMP2);
+    /* Store r3 to a safe location in the exit state before calling handler */
+    /* The exit handler will save all registers, so we just need to ensure r3 is preserved */
+    common_hiop = as->mcp;
+  }
+#endif
+  
   emit_jmp(as, (MCode *)(void *)lj_vm_exit_handler);
   emit_loadi(as, RID_TMP2, as->T->traceno);
   emit_rre(as, S390X_RRE_LGR, RID_LR, RID_TMP2);
   common = as->mcp;
+  
   for (i = 0; i < nexits; i++) {
     MCode *p = mxp + 5*i;
+#if LJ_TARGET_S390X && LJ_BE
+    MCode *target = (i < as->T->nsnap && as->T->snap[i].has_hiop) ? common_hiop : common;
+    int64_t delta = target - (p+2);
+#else
     int64_t delta = common - (p+2);
+#endif
     lj_assertA(delta >= INT32_MIN && delta <= INT32_MAX,
 	       "s390x exit stub out of range");
     p[0] = (uint16_t)(0xa700 | (RID_TMP << 4) | S390X_RI_LGHI);

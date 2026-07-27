@@ -193,6 +193,9 @@ typedef struct SnapShot {
   uint8_t topslot;	/* Maximum frame extent. */
   uint8_t nent;		/* Number of compressed entries. */
   uint8_t count;	/* Count of taken exits for this snapshot. */
+#if LJ_TARGET_S390X && LJ_BE
+  uint8_t has_hiop;	/* This snapshot has HIOP state (r3/RID_RETLO). */
+#endif
 } SnapShot;
 
 #define SNAPCOUNT_DONE	255	/* Already compiled and linked a side trace. */
