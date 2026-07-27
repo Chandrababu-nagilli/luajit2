@@ -3830,7 +3830,7 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     |  sllg RA, RA, 3
     |  lg TAB:RB, -16(RA, BASE)
     |  cleartp TAB:RB
-    |  llgf RC, -4(RA, BASE)		// Get index from control var.
+    |  llgf RC, -4(RA, BASE)		// Get index from control var (big-endian: value in lower 32 bits at offset -4)
     |  llgf TMPR1, TAB:RB->asize
     |  la PC, 4(PC)
     |  lg ITYPE, TAB:RB->array
@@ -3893,9 +3893,9 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     |  llgc TMPR1, CFUNC:RB->ffid
     |  clfi TMPR1, (uint8_t)FF_next_N; jne >5
     |  branchPC RD
-    |  llihl TMPR1, 0x7fff
-    |  iihh TMPR1, 0xfffe
-    |  stg TMPR1, -8(RA, BASE)		// Initialize control var.
+    |  iilf TMPR1, LJ_KEYINDEX		// Load LJ_KEYINDEX into lower 32 bits
+    |  sllg TMPR1, TMPR1, 32		// Shift to upper 32 bits (big-endian: tag position)
+    |  stg TMPR1, -8(RA, BASE)		// Store: upper 32=LJ_KEYINDEX (tag), lower 32=0 (value)
     |1:
     |  ins_next
     |5:  // Despecialize bytecode if any of the checks fail.
@@ -4339,8 +4339,8 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
 #if !LJ_HASJIT
     break;
 #endif
-    | // Fall through to BC_IFUNCV. Assumes BC_IFUNCV follows.
-    break;
+    | stg r0, 0  // NYI: compiled vararg functions
+    break;           /* NYI: compiled vararg functions. */
 
   case BC_IFUNCV:
     |  ins_AD  // BASE = new base, RA = framesize, RD = nargs+1

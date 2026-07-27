@@ -674,7 +674,7 @@ static void rec_loop_jit(jit_State *J, TraceNo lnk, LoopEvent ev)
 /* Record ITERN. */
 static LoopEvent rec_itern(jit_State *J, BCReg ra, BCReg rb)
 {
-#if LJ_BE
+#if 0  /* Temporarily enable BC_ITERN on big-endian for s390x implementation */
   /* YAGNI: Disabled on big-endian due to issues with lj_vm_next,
   ** IR_HIOP, RID_RETLO/RID_RETHI and ra_destpair.
   */
@@ -2709,8 +2709,8 @@ void lj_record_ins(jit_State *J)
     rec_func_lua(J);
     break;
   case BC_JFUNCV:
-    rec_func_vararg(J);
-    rec_func_setup(J);
+    /* Cannot happen. No hotcall counting for varag funcs. */
+    lj_assertJ(0, "unsupported vararg hotcall");
     break;
 
   case BC_FUNCC:

@@ -1064,16 +1064,39 @@ static void asm_equal(ASMState *as, IRIns *ir)
 { asm_comp(as, ir); }
 static void asm_hiop(ASMState *as, IRIns *ir)
 {
-  /* HIOP is used to hold the hiword operand of a split operation. */
+  /* HIOP is marked as a store because it needs its own DCE logic. */
+  int uselo = ra_used(ir-1), usehi = ra_used(ir);  /* Loword/hiword used? */
+  if (LJ_UNLIKELY(!(as->flags & JIT_F_OPT_DCE))) uselo = usehi = 1;
+  
   if ((ir-1)->o == IR_CONV && irt_is64((ir-1)->t)) {
     /* Signed conversion to 64 bit. */
-    IRIns *lo = ir-1;
-    Reg dest = ra_dest(as, ir, RSET_GPR);
-    Reg left = ra_alloc1(as, lo->op1, RSET_GPR);
-    emit_rxy(as, S390X_RSY_SRAG, dest, left, 0, 31);
-  } else {
-    /* Other HIOP cases are handled by the lo operation. */
-    lj_assertA(ra_noreg(ir->r), "HIOP should not be allocated");
+    as->curins--;  /* Always skip the CONV. */
+    if (usehi || uselo) {
+      IRIns *lo = ir-1;
+      Reg dest = ra_dest(as, ir, RSET_GPR);
+      Reg left = ra_alloc1(as, lo->op1, RSET_GPR);
+      emit_rxy(as, S390X_RSY_SRAG, dest, left, 0, 31);
+    }
+    return;
+  }
+  
+  if (!usehi) return;  /* Skip unused hiword op for all remaining ops. */
+  
+  switch ((ir-1)->o) {
+  case IR_CALLN: case IR_CALLL: case IR_CALLS: case IR_CALLXS:
+    if (!uselo)
+      ra_allocref(as, ir->op1, RID2RSET(RID_RETLO));  /* Mark lo op as used. */
+    else {
+      /* For lj_vm_next, capture the second return value (next index) from r3 */
+      Reg dest = ra_dest(as, ir, RSET_GPR);
+      if (dest != RID_RETLO) {
+        emit_rre(as, S390X_RRE_LGR, dest, RID_RETLO);
+      }
+    }
+    break;
+  default:
+    lj_assertA(ra_noreg(ir->r), "HIOP should not be allocated for op %d", (ir-1)->o);
+    break;
   }
 }
 static void asm_prof(ASMState *as, IRIns *ir)
